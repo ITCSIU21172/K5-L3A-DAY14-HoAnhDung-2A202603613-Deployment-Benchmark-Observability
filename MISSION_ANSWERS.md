@@ -191,6 +191,68 @@ Số liệu đo lường thực tế từ Docker trên máy:
 
 ---
 
+## Part 3: Cloud Deployment
+
+### 1. Thông tin Triển khai Production (Railway)
+- **Nền tảng:** Railway
+- **Public URL:** `https://k5-l3a-day14-hoanhdung-2a202603613-deployment-be-production.up.railway.app`
+- **Các biến môi trường cấu hình trên Railway Dashboard:**
+  - `PORT`: `8000`
+  - `ENVIRONMENT`: `production`
+  - `AGENT_API_KEY`: `secret-prod-key-123`
+  - `REDIS_URL`: `${{Redis.REDIS_URL}}` (liên kết trực tiếp từ Database service Redis trên cùng project)
+
+### 2. Kết quả Kiểm thử 4 Lệnh Tự Kiểm (CP6 Self-Test)
+
+```bash
+BASE="https://k5-l3a-day14-hoanhdung-2a202603613-deployment-be-production.up.railway.app"
+AGENT_API_KEY="secret-prod-key-123"
+
+# 1. Health check (Liveness) -> Mong đợi HTTP 200
+curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/health"
+# Kết quả: 200
+
+# 2. Readiness check (Phụ thuộc Redis) -> Mong đợi HTTP 200
+curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/ready"
+# Kết quả: 200
+
+# 3. API Test không có Header X-API-Key -> Mong đợi HTTP 401
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" \
+  -H 'Content-Type: application/json' -d '{"question":"Hello"}'
+# Kết quả: 401
+
+# 4. API Test có Header X-API-Key hợp lệ -> Mong đợi HTTP 200
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" \
+  -H 'Content-Type: application/json' -H "X-API-Key: $AGENT_API_KEY" -d '{"question":"Hello"}'
+# Kết quả: 200
+```
+
+### 3. So sánh cấu hình `railway.toml` và `render.yaml` (Exercise 3.1 & 3.2)
+
+| Tiêu chí | Railway (`railway.toml`) | Render Blueprint (`render.yaml`) |
+|---|---|---|
+| **Định dạng cấu hình** | TOML (`[build]`, `[deploy]`) | YAML (Khai báo danh sách `services:`) |
+| **Cách khai báo Build** | Đơn giản: `builder = "DOCKERFILE"` | Khai báo chi tiết: `type: web`, `runtime: docker`, `plan: free` |
+| **Health Check Path** | `healthcheckPath = "/health"` | `healthCheckPath: /health` |
+| **Restart Policy** | Hỗ trợ cấu hình `restartPolicyType = "ON_FAILURE"`, `restartPolicyMaxRetries = 3` | Tự động quản lý theo container lifecycle của Render |
+| **Quản lý Cổng (PORT)** | App tự đọc biến môi trường `$PORT` do Railway cấp động qua `${PORT:-8000}` | Có thể gán tĩnh hoặc Render inject vào container qua envVars |
+| **Quản lý Secrets & Biến** | Secret được nhập tập trung trên Web UI/CLI, không ghi giá trị nhạy cảm vào file | Hỗ trợ `generateValue: true` (tự sinh secret ngẫu nhiên) hoặc `sync: false` (buộc nhập tay trên UI), chống lộ secrets vào Git |
+| **Hệ sinh thái Multi-service** | Canvas trực quan, kết nối database qua service reference `${{Redis.REDIS_URL}}` | Có thể khai báo đồng thời Web Service và Redis/Postgres Blueprint trong cùng 1 file YAML |
+
+### 4. Phân tích Pipeline CI/CD Google Cloud Run (Exercise 3.3)
+Dựa trên `cloudbuild.yaml` và `service.yaml` trong thư mục `03-cloud-deployment/production-cloud-run/`:
+
+Pipeline CI/CD được kích hoạt tự động mỗi khi có commit push lên nhánh `main`, bao gồm 4 bước nối tiếp:
+1. **Bước 1 — Automated Testing (`Step: test`):** Khởi tạo môi trường `python:3.11-slim`, cài đặt dependencies và chạy `pytest tests/ -v`. Đây là **Quality Gate**: nếu có bất kỳ test case nào thất bại, pipeline dừng ngay lập tức, ngăn chặn code lỗi được build và deploy.
+2. **Bước 2 — Container Build (`Step: build`):** Sử dụng `docker build` để đóng gói source code thành Docker image với 2 tags: `$COMMIT_SHA` (định danh duy nhất theo git commit để phục vụ audit/rollback) và `latest`. Áp dụng cờ `--cache-from` từ bản `latest` để tận dụng Docker layer caching, rút ngắn thời gian build.
+3. **Bước 3 — Registry Push (`Step: push`):** Đẩy đồng thời cả 2 image tags lên Google Container Registry (`gcr.io/$PROJECT_ID/ai-agent`).
+4. **Bước 4 — Deployment (`Step: deploy`):** Triển khai image lên Cloud Run tại region `asia-southeast1`. Cấu hình bao gồm:
+   - **Auto-scaling & Tránh Cold start:** Thiết lập `--min-instances=1` (luôn duy trì 1 container chạy sẵn để triệt tiêu độ trễ cold start cho người dùng) và `--max-instances=10` (ngăn chặn chi phí tăng vọt khi bị quá tải/DDoS).
+   - **Bảo mật tuyệt đối:** Lấy secret an toàn từ Google Secret Manager qua cờ `--set-secrets=OPENAI_API_KEY=openai-key:latest`, hoàn toàn không hardcode API key.
+   - **Knative Service Spec (`service.yaml`):** Khai báo tài nguyên (limits 1 CPU / 512Mi RAM) và thiết lập concurrency tối đa 80 request/instance giúp tối ưu hoá chi phí vận hành serverless.
+
+---
+
 ## Part 4: API Security
 
 ### Exercise 4.1: API Key Authentication (Bản Develop — `04-api-gateway/develop/`)
@@ -504,3 +566,13 @@ Total messages: 10
 - **Prompt / Câu hỏi:** Tự thiết kế và hoàn thiện toàn bộ mã nguồn bản khung trong `06-lab-complete/` đáp ứng đầy đủ 12 tiêu chí chấm điểm của `check_production_ready.py`.
 - **Phản hồi nhận được:** Hướng dẫn hiện thực `app/config.py`, `app/redis_client.py`, `app/auth.py`, `app/rate_limiter.py` (Redis ZSET sliding window), `app/cost_guard.py` (Redis token cost tracker), `app/main.py` (JSON logging, `/health`, `/ready`, `/ask`, graceful shutdown), `Dockerfile` multi-stage (< 500 MB), `docker-compose.yml`, `.dockerignore`, `.env.example`, `railway.toml` và `render.yaml`.
 - **Tự kiểm tra và xác minh:** Đã chạy script chấm tự động `check_production_ready.py`, vượt qua toàn bộ 42/42 checks. Đo lường kích thước image đạt 254 MB, thời gian `docker stop` tắt êm chỉ 0.7 giây, các bài test auth, rate limit, cost guard, readiness khi mất Redis đều đạt kết quả mong đợi. Output đạt `PASS 12/12`.
+
+### Part 3: Cloud Deployment
+- **Prompt / Câu hỏi:** Triển khai agent production lên Railway, kết nối dịch vụ Redis cloud, cấu hình biến môi trường, domain public và phân tích so sánh cấu hình `railway.toml` vs `render.yaml` cùng pipeline Cloud Run (`cloudbuild.yaml`).
+- **Phản hồi nhận được:** Hướng dẫn cấu hình Root Directory `06-lab-complete`, kết nối biến `REDIS_URL`, thiết lập public networking domain và thực hiện bộ 4 lệnh tự kiểm CP6. Phân tích so sánh chi tiết giữa cơ chế build, healthcheck, quản lý secret của Railway và Render Blueprint, cùng quy trình CI/CD 4 bước trên Cloud Build.
+- **Tự kiểm tra và xác minh:** Đã deploy thành công trên Railway với URL `https://k5-l3a-day14-hoanhdung-2a202603613-deployment-be-production.up.railway.app`. Chạy thành công cả 4 lệnh tự kiểm (`/health` -> 200, `/ready` -> 200, `/ask` thiếu key -> 401, `/ask` có key -> 200). Đã lưu ảnh minh chứng `dashboard.png`, `running.png`, `test.png` vào thư mục `screenshots/`.
+
+### Part 7: Benchmark & Observability
+- **Prompt / Câu hỏi:** Thực hiện benchmark hiệu năng (load test với concurrency 1, 10, 50, 100), tail latency (`MOCK_SLOW_RATE`), benchmark chất lượng (eval trên golden dataset), sửa knowledge base đạt 100% không regression và triển khai full stack Observability (Prometheus, Grafana, Jaeger, Locust).
+- **Phản hồi nhận được:** Hướng dẫn chạy `load_test.py`, phân tích vì sao RPS không tăng tuyến tính và vì sao tail latency đòi hỏi đo bằng p95/p99. Hướng dẫn sửa 2 câu lỗi trong `KNOWLEDGE_BASE` (`security-02`, `scaling-03`), chạy so sánh scaling 1 vs 3 instances bằng Locust headless và phân tích các thí nghiệm phá hệ thống (chaos testing).
+- **Tự kiểm tra và xác minh:** Đã chạy đo đạc thực tế toàn bộ các bài test, thu thập đầy đủ 10 file báo cáo JSON trong `reports/`, 2 file CSV trong `benchmark-results/`. Eval đạt 100% (23/23 ✅ PASS). Đo lường scaling chứng minh p95 giảm từ 1200ms xuống 230ms khi tăng lên 3 instances. Chụp đầy đủ 4 ảnh minh chứng Observability: `grafana-dashboard.png`, `jaeger-slow-trace.png`, `jaeger-error-trace.png`, và `prometheus-alert-firing.png`. Ghi nhận toàn bộ số liệu thật vào `BENCHMARK_REPORT.md`.
